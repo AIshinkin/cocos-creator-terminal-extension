@@ -6,11 +6,13 @@ import { LineEditor } from './line-editor';
 import { HistoryStore } from './history-store';
 import { Toolbar } from './toolbar';
 import {
+  type FontSettings, toCssFamily, loadFontSettings, saveFontSettings,
+} from './settings';
+import {
   PKG, MSG, type ShellKind, type BackendMode,
   type DataPayload, type IdlePayload, type ExitPayload,
 } from '../shared/messages';
 
-const QUICK_COMMANDS = ['git status', 'git pull', 'npm install', 'npm run build'];
 const DEFAULT_SHELL: ShellKind = 'powershell';
 const PROMPT = '\x1b[32m›\x1b[0m ';
 const HINT = '\x1b[90mCocos Terminal · Ctrl+C copy (when selected) / Ctrl+V paste / right-click\x1b[0m';
@@ -28,7 +30,7 @@ interface Controller {
   destroy(): void;
 }
 
-function createController(view: HTMLElement, toolbarRoot: HTMLElement): Controller {
+function createController(view: HTMLElement, toolbarRoot: HTMLElement, fontSettings: FontSettings): Controller {
   const sessionId = newId();
   let shell: ShellKind = DEFAULT_SHELL;
   let mode: BackendMode | null = null; // resolved after open-session
@@ -40,8 +42,8 @@ function createController(view: HTMLElement, toolbarRoot: HTMLElement): Controll
   const editor = new LineEditor(store.load());
 
   const term = new Terminal({
-    fontSize: 13,
-    fontFamily: 'Consolas, "Courier New", monospace',
+    fontSize: fontSettings.size,
+    fontFamily: toCssFamily(fontSettings.family),
     theme: { background: '#1e1e1e' },
     cursorBlink: true,
     scrollback: 5000,
@@ -84,17 +86,19 @@ function createController(view: HTMLElement, toolbarRoot: HTMLElement): Controll
 
   // ── toolbar ──────────────────────────────────────────────────────────────
   const toolbar = new Toolbar(toolbarRoot, {
-    shell,
-    quickCommands: QUICK_COMMANDS,
-    onShell: (s) => {
-      shell = s;
-      Editor.Message.request(PKG, MSG.SET_SHELL, sessionId, shell, cwd);
-      term.writeln(`\r\n\x1b[90m[switched to ${s}]\x1b[0m`);
-      if (mode === 'line') prompt();
+    font: fontSettings.family,
+    fontSize: fontSettings.size,
+    onFont: (family) => {
+      fontSettings.family = family;
+      term.options.fontFamily = toCssFamily(family);
+      fit.fit();
+      saveFontSettings(fontSettings);
     },
-    onQuick: (cmd) => {
-      if (mode === 'raw') { Editor.Message.send(PKG, MSG.INPUT, sessionId, cmd + '\r'); return; }
-      if (mode === 'line' && !running) { term.write(cmd); submitLine(cmd); }
+    onFontSize: (px) => {
+      fontSettings.size = px;
+      term.options.fontSize = px;
+      fit.fit();
+      saveFontSettings(fontSettings);
     },
     onClear: () => term.clear(),
     onStop: () => {
@@ -195,9 +199,10 @@ export default Editor.Panel.define({
     onExit(p: ExitPayload) { (this as any)._ctrl?.onExit(p); },
   },
 
-  ready() {
+  async ready() {
     const self = this as any;
-    self._ctrl = createController(self.$.view, self.$.toolbar);
+    const fontSettings = await loadFontSettings();
+    self._ctrl = createController(self.$.view, self.$.toolbar, fontSettings);
   },
 
   close() {

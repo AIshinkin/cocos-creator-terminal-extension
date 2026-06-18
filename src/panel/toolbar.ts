@@ -1,19 +1,17 @@
-import type { ShellKind } from '../shared/messages';
+import {
+  FONT_PRESETS, MIN_FONT_SIZE, MAX_FONT_SIZE,
+} from './settings';
 
 export interface ToolbarOpts {
-  shell: ShellKind;
-  quickCommands: string[];
-  onShell(shell: ShellKind): void;
-  onQuick(cmd: string): void;
+  font: string;       // primary family name
+  fontSize: number;   // px
+  onFont(family: string): void;
+  onFontSize(px: number): void;
   onClear(): void;
   onStop(): void;
 }
 
-const SHELL_LABELS: Record<ShellKind, string> = {
-  powershell: 'PowerShell',
-  cmd: 'cmd',
-  bash: 'Git Bash',
-};
+const CUSTOM = '__custom__';
 
 export class Toolbar {
   private cwdEl: HTMLSpanElement;
@@ -22,24 +20,64 @@ export class Toolbar {
   constructor(root: HTMLElement, opts: ToolbarOpts) {
     const doc = root.ownerDocument;
 
-    const shellSel = doc.createElement('select');
-    (['powershell', 'cmd', 'bash'] as ShellKind[]).forEach((k) => {
+    // ── font family: preset dropdown + custom text input ───────────────────
+    const isPreset = FONT_PRESETS.includes(opts.font);
+
+    const fontSel = doc.createElement('select');
+    fontSel.title = 'Font family';
+    FONT_PRESETS.forEach((name) => {
       const o = doc.createElement('option');
-      o.value = k; o.textContent = SHELL_LABELS[k];
-      if (k === opts.shell) o.selected = true;
-      shellSel.appendChild(o);
+      o.value = name; o.textContent = name;
+      if (isPreset && name === opts.font) o.selected = true;
+      fontSel.appendChild(o);
     });
-    shellSel.addEventListener('change', () => opts.onShell(shellSel.value as ShellKind));
-    root.appendChild(shellSel);
+    const customOpt = doc.createElement('option');
+    customOpt.value = CUSTOM; customOpt.textContent = 'Custom…';
+    if (!isPreset) customOpt.selected = true;
+    fontSel.appendChild(customOpt);
+    root.appendChild(fontSel);
 
-    opts.quickCommands.forEach((cmd) => {
-      const b = doc.createElement('button');
-      b.textContent = cmd;
-      b.title = `Run: ${cmd}`;
-      b.addEventListener('click', () => opts.onQuick(cmd));
-      root.appendChild(b);
+    const customInput = doc.createElement('input');
+    customInput.type = 'text';
+    customInput.className = 'font-custom';
+    customInput.placeholder = 'Font name';
+    customInput.title = 'Custom font family';
+    customInput.value = isPreset ? '' : opts.font;
+    customInput.style.display = isPreset ? 'none' : '';
+    root.appendChild(customInput);
+
+    const commitCustom = () => {
+      const v = customInput.value.trim();
+      if (v) opts.onFont(v);
+    };
+    fontSel.addEventListener('change', () => {
+      if (fontSel.value === CUSTOM) {
+        customInput.style.display = '';
+        customInput.focus();
+        commitCustom();
+      } else {
+        customInput.style.display = 'none';
+        opts.onFont(fontSel.value);
+      }
     });
+    customInput.addEventListener('change', commitCustom);
 
+    // ── font size ──────────────────────────────────────────────────────────
+    const sizeInput = doc.createElement('input');
+    sizeInput.type = 'number';
+    sizeInput.className = 'font-size';
+    sizeInput.title = 'Font size (px)';
+    sizeInput.min = String(MIN_FONT_SIZE);
+    sizeInput.max = String(MAX_FONT_SIZE);
+    sizeInput.value = String(opts.fontSize);
+    const commitSize = () => {
+      const n = parseInt(sizeInput.value, 10);
+      if (Number.isFinite(n)) opts.onFontSize(n);
+    };
+    sizeInput.addEventListener('change', commitSize);
+    root.appendChild(sizeInput);
+
+    // ── spacer + status ────────────────────────────────────────────────────
     const spacer = doc.createElement('span');
     spacer.className = 'spacer';
     root.appendChild(spacer);

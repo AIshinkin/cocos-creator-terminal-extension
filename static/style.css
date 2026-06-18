@@ -1,6 +1,9 @@
 .term-root { display:flex; flex-direction:column; height:100%; width:100%; background:#1e1e1e; }
 .term-toolbar { display:flex; align-items:center; gap:6px; padding:4px 6px; background:#252526; border-bottom:1px solid #333; flex:0 0 auto; }
 .term-toolbar button, .term-toolbar select { background:#3a3a3a; color:#ddd; border:1px solid #555; border-radius:3px; padding:2px 8px; font-size:12px; cursor:pointer; }
+.term-toolbar input { background:#3a3a3a; color:#ddd; border:1px solid #555; border-radius:3px; padding:2px 6px; font-size:12px; }
+.term-toolbar input.font-custom { width:120px; }
+.term-toolbar input.font-size { width:48px; }
 .term-toolbar button:hover { background:#4a4a4a; }
 .term-toolbar .spacer { flex:1; }
 .term-toolbar .cwd { color:#9cdcfe; font-size:11px; font-family:monospace; max-width:280px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
