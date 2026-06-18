@@ -1,0 +1,105 @@
+{
+  "package_version": 2,
+  "name": "terminal",
+  "version": "0.1.0",
+  "description": "In-editor terminal panel for Cocos Creator 3.8 (real PTY via node-pty)",
+  "main": "./dist/main.js",
+  "editor": ">=3.8.0",
+  "author": "Anton Ishinkin",
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test \"test/**/*.test.ts\""
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "esbuild": "^0.24.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  },
+  "dependencies": {
+    "@lydell/node-pty": "^1.2.0-beta.12",
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/xterm": "^5.5.0"
+  },
+  "panels": {
+    "default": {
+      "title": "Terminal",
+      "type": "dockable",
+      "main": "./dist/panel.js",
+      "size": {
+        "min-width": 400,
+        "min-height": 300,
+        "width": 800,
+        "height": 400
+      }
+    }
+  },
+  "contributions": {
+    "menu": [
+      {
+        "path": "i18n:menu.panel",
+        "label": "Terminal",
+        "message": "open-panel"
+      }
+    ],
+    "messages": {
+      "open-panel": {
+        "methods": [
+          "openPanel"
+        ]
+      },
+      "open-session": {
+        "methods": [
+          "openSession"
+        ]
+      },
+      "run": {
+        "methods": [
+          "run"
+        ]
+      },
+      "input": {
+        "methods": [
+          "input"
+        ]
+      },
+      "resize": {
+        "methods": [
+          "resize"
+        ]
+      },
+      "signal": {
+        "methods": [
+          "signal"
+        ]
+      },
+      "set-shell": {
+        "methods": [
+          "setShell"
+        ]
+      },
+      "close-session": {
+        "methods": [
+          "closeSession"
+        ]
+      },
+      "data": {
+        "methods": [
+          "default.onData"
+        ]
+      },
+      "idle": {
+        "methods": [
+          "default.onIdle"
+        ]
+      },
+      "exit": {
+        "methods": [
+          "default.onExit"
+        ]
+      }
+    }
+  }
+}
