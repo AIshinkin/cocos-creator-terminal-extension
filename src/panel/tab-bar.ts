@@ -155,7 +155,10 @@ export class TabBar {
     this.menuEl = menu;
 
     const onDown = (e: MouseEvent) => {
-      if (this.menuEl && !this.menuEl.contains(e.target as Node)) this.closeMenu();
+      // The panel lives in a shadow root, so a document-level listener sees the
+      // event retargeted to the shadow host — `e.target` is never the inner
+      // menu node. Use composedPath(), which includes shadow-internal nodes.
+      if (this.menuEl && !e.composedPath().includes(this.menuEl)) this.closeMenu();
     };
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') this.closeMenu(); };
     this.menuCleanup = () => {
