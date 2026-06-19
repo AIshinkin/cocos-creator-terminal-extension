@@ -5,6 +5,15 @@ export const TAB_COLORS: string[] = [
   '#e06c75', '#e5c07b', '#98c379', '#56b6c2', '#61afef', '#c678dd',
 ];
 
+// Translucent fill derived from a palette hex, so a tinted tab stays readable
+// over the dark strip. Falls back to the raw value for non-#rrggbb inputs.
+function hexToRgba(hex: string, alpha: number): string {
+  const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex);
+  if (!m) return hex;
+  const r = parseInt(m[1], 16), g = parseInt(m[2], 16), b = parseInt(m[3], 16);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
 export interface TabBarOpts {
   onSelect(id: string): void;
   onClose(id: string): void;
@@ -34,8 +43,13 @@ export class TabBar {
     const activeId = this.model.activeId();
 
     for (const tab of this.model.list()) {
+      const isActive = tab.id === activeId;
       const el = doc.createElement('div');
-      el.className = 'term-tab' + (tab.id === activeId ? ' active' : '');
+      el.className = 'term-tab' + (isActive ? ' active' : '');
+      if (tab.color) {
+        el.style.background = hexToRgba(tab.color, isActive ? 0.34 : 0.2);
+        el.style.borderColor = hexToRgba(tab.color, isActive ? 0.85 : 0.5);
+      }
 
       const accent = doc.createElement('span');
       accent.className = 'accent';
