@@ -1,7 +1,13 @@
 import { SessionManager } from './session-manager';
-import { PKG, TO_PANEL, type ShellKind } from './shared/messages';
+import { PKG, TO_PANEL, type ShellKind, type SavedPanelState } from './shared/messages';
 
 let manager: SessionManager | null = null;
+
+// Tab snapshot kept in the main process so the panel can be re-docked or
+// reopened without losing its sessions. Backend shells live in `manager` and
+// are not closed when the panel goes away — only on explicit tab close or
+// extension unload.
+let panelState: SavedPanelState | null = null;
 
 export const methods = {
   openPanel(): void { Editor.Panel.open('terminal'); },
@@ -16,6 +22,8 @@ export const methods = {
     return manager?.setShell(sessionId, shell, cwd) ?? 'line';
   },
   closeSession(sessionId: string): void { manager?.close(sessionId); },
+  saveTabs(state: SavedPanelState): void { panelState = state; },
+  loadTabs(): SavedPanelState | null { return panelState; },
 };
 
 export function load(): void {
@@ -26,4 +34,4 @@ export function load(): void {
   });
 }
 
-export function unload(): void { manager?.disposeAll(); manager = null; }
+export function unload(): void { manager?.disposeAll(); manager = null; panelState = null; }

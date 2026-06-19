@@ -1,5 +1,6 @@
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
+import { SerializeAddon } from '@xterm/addon-serialize';
 import xtermCss from '@xterm/xterm/css/xterm.css';
 import ownCss from '../../static/style.css';
 import { LineEditor } from './line-editor';
@@ -13,6 +14,7 @@ import {
 import {
   PKG, MSG, type ShellKind, type BackendMode,
   type DataPayload, type IdlePayload, type ExitPayload,
+  type SavedTab, type SavedPanelState,
 } from '../shared/messages';
 
 const DEFAULT_SHELL: ShellKind = 'powershell';
@@ -28,6 +30,15 @@ interface ControllerHooks {
   onRunning(running: boolean): void;
 }
 
+// When present, the controller attaches to an already-live backend session
+// (panel re-dock / reopen) instead of opening a fresh one.
+interface AttachInfo {
+  mode: BackendMode;
+  snapshot: string;
+  running: boolean;
+  cwd: string;
+}
+
 interface Controller {
   sessionId: string;
   onData(p: DataPayload): void;
@@ -37,13 +48,16 @@ interface Controller {
   stop(): void;
   getCwd(): string;
   isRunning(): boolean;
+  getMode(): BackendMode | null;
+  serialize(): string;
   setFont(cssFamily: string): void;
   setFontSize(px: number): void;
   show(): void;
   hide(): void;
   fit(): void;
   focus(): void;
-  destroy(): void;
+  detach(): void;  // tear down the view but keep the backend session alive
+  destroy(): void; // tear down the view AND close the backend session
 }
 
 // One shell session bound to its own xterm view. The id is supplied by the
@@ -56,11 +70,12 @@ function createController(
   view: HTMLElement,
   fontSettings: FontSettings,
   hooks: ControllerHooks,
+  attach?: AttachInfo,
 ): Controller {
   const shell: ShellKind = DEFAULT_SHELL;
-  let mode: BackendMode | null = null; // resolved after open-session
-  let running = false;                 // line mode only
-  let cwd: string = (Editor.Project && Editor.Project.path) || '.';
+  let mode: BackendMode | null = attach ? attach.mode : null; // resolved after open-session
+  let running = attach ? attach.running : false;              // line mode only
+  let cwd: string = attach ? attach.cwd : ((Editor.Project && Editor.Project.path) || '.');
 
   const historyFile = `${cwd}/temp/terminal-history.json`;
   const store = new HistoryStore(historyFile);
@@ -77,7 +92,9 @@ function createController(
     convertEol: true,
   });
   const fit = new FitAddon();
+  const serializer = new SerializeAddon();
   term.loadAddon(fit);
+  term.loadAddon(serializer);
   term.open(view);
   fit.fit();
 
@@ -141,18 +158,28 @@ function createController(
     if (!copySelection()) pasteClipboard();
   });
 
-  // ── start session, then adapt to the resolved mode ───────────────────────
-  term.writeln(HINT);
-  Editor.Message.request(PKG, MSG.OPEN_SESSION, sessionId, shell, cwd).then((m: string) => {
-    mode = m === 'raw' ? 'raw' : 'line';
+  // ── start a fresh session, or re-attach to a live one after a re-dock ─────
+  if (attach) {
+    // Backend session is still alive; just repaint the saved screen and, for a
+    // raw pty, re-sync its size to this freshly-created view.
+    if (attach.snapshot) term.write(attach.snapshot);
     if (mode === 'raw') {
       fit.fit();
       Editor.Message.send(PKG, MSG.RESIZE, sessionId, term.cols, term.rows);
-    } else {
-      term.writeln('\x1b[33m[PTY unavailable — line mode: non-interactive commands only]\x1b[0m');
-      prompt();
     }
-  }).catch(() => { mode = 'line'; prompt(); });
+  } else {
+    term.writeln(HINT);
+    Editor.Message.request(PKG, MSG.OPEN_SESSION, sessionId, shell, cwd).then((m: string) => {
+      mode = m === 'raw' ? 'raw' : 'line';
+      if (mode === 'raw') {
+        fit.fit();
+        Editor.Message.send(PKG, MSG.RESIZE, sessionId, term.cols, term.rows);
+      } else {
+        term.writeln('\x1b[33m[PTY unavailable — line mode: non-interactive commands only]\x1b[0m');
+        prompt();
+      }
+    }).catch(() => { mode = 'line'; prompt(); });
+  }
 
   return {
     sessionId,
@@ -178,12 +205,19 @@ function createController(
     },
     getCwd() { return cwd; },
     isRunning() { return running; },
+    getMode() { return mode; },
+    serialize() { return serializer.serialize(); },
     setFont(cssFamily) { term.options.fontFamily = cssFamily; fit.fit(); },
     setFontSize(px) { term.options.fontSize = px; fit.fit(); },
     show() { view.classList.remove('hidden'); fit.fit(); term.focus(); },
     hide() { view.classList.add('hidden'); },
     fit() { fit.fit(); },
     focus() { term.focus(); },
+    detach() {
+      store.save(editor.getHistory());
+      term.dispose();
+      view.remove();
+    },
     destroy() {
       store.save(editor.getHistory());
       Editor.Message.request(PKG, MSG.CLOSE_SESSION, sessionId);
@@ -224,6 +258,22 @@ export default Editor.Panel.define({
       self._toolbar.setRunning(ctrl.isRunning());
     },
 
+    _hooksFor(id: string): ControllerHooks {
+      const self = this as any;
+      return {
+        onCwd: (cwd: string) => { if (self._model.activeId() === id) self._toolbar.setCwd(cwd); },
+        onRunning: (r: boolean) => { if (self._model.activeId() === id) self._toolbar.setRunning(r); },
+      };
+    },
+
+    _makeView(): HTMLElement {
+      const self = this as any;
+      const view = self.$.views.ownerDocument.createElement('div');
+      view.className = 'term-view hidden';
+      self.$.views.appendChild(view);
+      return view;
+    },
+
     _newTab() {
       const self = this as any;
       const prev = self._active();
@@ -232,19 +282,35 @@ export default Editor.Panel.define({
       const id = newId();
       self._counter += 1;
       const title = `Terminal ${self._counter}`;
-      const view = self.$.views.ownerDocument.createElement('div');
-      view.className = 'term-view hidden';
-      self.$.views.appendChild(view);
-
-      const ctrl: Controller = createController(id, view, self._fontSettings, {
-        onCwd: (cwd: string) => { if (self._model.activeId() === id) self._toolbar.setCwd(cwd); },
-        onRunning: (r: boolean) => { if (self._model.activeId() === id) self._toolbar.setRunning(r); },
-      });
+      const ctrl: Controller = createController(id, self._makeView(), self._fontSettings, self._hooksFor(id));
       self._controllers.set(id, ctrl);
       self._model.add(id, title);
       self._bar.render();
       ctrl.show();
       self._syncToolbar(ctrl);
+    },
+
+    // Rebuild the tab set from state saved in the main process, re-attaching to
+    // the still-alive backend sessions (panel re-dock / reopen).
+    _restoreState(state: SavedPanelState) {
+      const self = this as any;
+      for (const saved of state.tabs as SavedTab[]) {
+        const ctrl: Controller = createController(
+          saved.sessionId, self._makeView(), self._fontSettings, self._hooksFor(saved.sessionId),
+          { mode: saved.mode, snapshot: saved.snapshot, running: saved.running, cwd: saved.cwd },
+        );
+        self._controllers.set(saved.sessionId, ctrl);
+        self._model.add(saved.sessionId, saved.title);
+        if (saved.color) self._model.setColor(saved.sessionId, saved.color);
+      }
+      self._counter = state.tabs.length;
+
+      const wanted = state.activeId && self._controllers.has(state.activeId)
+        ? state.activeId : self._model.activeId();
+      self._model.select(wanted);
+      self._bar.render();
+      const ctrl: Controller | undefined = self._controllers.get(self._model.activeId());
+      if (ctrl) { ctrl.show(); self._syncToolbar(ctrl); }
     },
 
     _switchTo(id: string) {
@@ -307,14 +373,35 @@ export default Editor.Panel.define({
       onColor: (id: string, color: string | null) => { self._model.setColor(id, color); self._bar.render(); },
     });
 
-    self._newTab(); // first tab
+    // Restore tabs from the main process if any survived a previous panel
+    // teardown (re-dock / reopen); otherwise start with one fresh tab.
+    let state: SavedPanelState | null = null;
+    try { state = await Editor.Message.request(PKG, MSG.LOAD_TABS); } catch { state = null; }
+    if (state && state.tabs && state.tabs.length) self._restoreState(state);
+    else self._newTab();
   },
 
   close() {
     const self = this as any;
-    if (self._controllers) {
-      for (const c of self._controllers.values() as Iterable<Controller>) c.destroy();
-      self._controllers.clear();
+    if (!self._controllers || !self._model) return;
+    // Snapshot tabs into the main process and detach WITHOUT closing the backend
+    // sessions, so a re-dock / reopen can re-attach to the live shells.
+    const tabs: SavedTab[] = [];
+    for (const t of self._model.list()) {
+      const c: Controller | undefined = self._controllers.get(t.id);
+      if (!c) continue;
+      tabs.push({
+        sessionId: t.id,
+        title: t.title,
+        color: t.color,
+        mode: c.getMode() === 'raw' ? 'raw' : 'line',
+        running: c.isRunning(),
+        cwd: c.getCwd(),
+        snapshot: c.serialize(),
+      });
     }
+    Editor.Message.send(PKG, MSG.SAVE_TABS, { tabs, activeId: self._model.activeId() });
+    for (const c of self._controllers.values() as Iterable<Controller>) c.detach();
+    self._controllers.clear();
   },
 });
