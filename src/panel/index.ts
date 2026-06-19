@@ -5,6 +5,8 @@ import ownCss from '../../static/style.css';
 import { LineEditor } from './line-editor';
 import { HistoryStore } from './history-store';
 import { Toolbar } from './toolbar';
+import { TabModel } from './tab-model';
+import { TabBar } from './tab-bar';
 import {
   type FontSettings, toCssFamily, loadFontSettings, saveFontSettings,
 } from './settings';
@@ -21,18 +23,41 @@ function newId(): string {
   return 's' + Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36);
 }
 
+interface ControllerHooks {
+  onCwd(cwd: string): void;
+  onRunning(running: boolean): void;
+}
+
 interface Controller {
   sessionId: string;
   onData(p: DataPayload): void;
   onIdle(p: IdlePayload): void;
   onExit(p: ExitPayload): void;
+  clear(): void;
+  stop(): void;
+  getCwd(): string;
+  isRunning(): boolean;
+  setFont(cssFamily: string): void;
+  setFontSize(px: number): void;
+  show(): void;
+  hide(): void;
   fit(): void;
+  focus(): void;
   destroy(): void;
 }
 
-function createController(view: HTMLElement, toolbarRoot: HTMLElement, fontSettings: FontSettings): Controller {
-  const sessionId = newId();
-  let shell: ShellKind = DEFAULT_SHELL;
+// One shell session bound to its own xterm view. The id is supplied by the
+// panel and used verbatim as the backend sessionId, so message routing and the
+// panel's controller map share one key. Toolbar-facing state (cwd, running) is
+// reported through hooks; the panel forwards it to the shared toolbar only when
+// this controller is the active tab.
+function createController(
+  sessionId: string,
+  view: HTMLElement,
+  fontSettings: FontSettings,
+  hooks: ControllerHooks,
+): Controller {
+  const shell: ShellKind = DEFAULT_SHELL;
   let mode: BackendMode | null = null; // resolved after open-session
   let running = false;                 // line mode only
   let cwd: string = (Editor.Project && Editor.Project.path) || '.';
@@ -40,6 +65,8 @@ function createController(view: HTMLElement, toolbarRoot: HTMLElement, fontSetti
   const historyFile = `${cwd}/temp/terminal-history.json`;
   const store = new HistoryStore(historyFile);
   const editor = new LineEditor(store.load());
+
+  const setRunning = (r: boolean) => { running = r; hooks.onRunning(r); };
 
   const term = new Terminal({
     fontSize: fontSettings.size,
@@ -59,8 +86,7 @@ function createController(view: HTMLElement, toolbarRoot: HTMLElement, fontSetti
   const submitLine = (line: string) => {
     term.write('\r\n');
     if (line.trim()) {
-      running = true;
-      toolbar.setRunning(true);
+      setRunning(true);
       Editor.Message.request(PKG, MSG.RUN, sessionId, line);
     } else {
       prompt();
@@ -83,35 +109,6 @@ function createController(view: HTMLElement, toolbarRoot: HTMLElement, fontSetti
     if (mode === 'raw') { Editor.Message.send(PKG, MSG.INPUT, sessionId, text); return; }
     if (mode === 'line' && !running) { const w = editor.insertText(text); if (w) term.write(w); }
   };
-
-  // ── toolbar ──────────────────────────────────────────────────────────────
-  const toolbar = new Toolbar(toolbarRoot, {
-    font: fontSettings.family,
-    fontSize: fontSettings.size,
-    onFont: (family) => {
-      fontSettings.family = family;
-      term.options.fontFamily = toCssFamily(family);
-      fit.fit();
-      saveFontSettings(fontSettings);
-    },
-    onFontSize: (px) => {
-      fontSettings.size = px;
-      term.options.fontSize = px;
-      fit.fit();
-      saveFontSettings(fontSettings);
-    },
-    onClear: () => term.clear(),
-    onStop: () => {
-      Editor.Message.request(PKG, MSG.SIGNAL, sessionId, 'stop');
-      if (mode === 'line') {
-        running = false;
-        toolbar.setRunning(false);
-        term.writeln('\r\n\x1b[90m[stopped — shell restarted]\x1b[0m');
-        prompt();
-      }
-    },
-  });
-  toolbar.setCwd(cwd);
 
   // ── input: raw → straight to pty; line → local line editor ───────────────
   term.onData((data: string) => {
@@ -162,20 +159,36 @@ function createController(view: HTMLElement, toolbarRoot: HTMLElement, fontSetti
     onData(p) { if (p.sessionId === sessionId) term.write(p.chunk); },
     onIdle(p) {
       if (p.sessionId !== sessionId || mode !== 'line') return;
-      running = false;
-      toolbar.setRunning(false);
-      if (p.cwd) { cwd = p.cwd; toolbar.setCwd(cwd); }
+      setRunning(false);
+      if (p.cwd) { cwd = p.cwd; hooks.onCwd(cwd); }
       prompt();
     },
     onExit(p) {
       if (p.sessionId !== sessionId) return;
       term.writeln(`\r\n\x1b[90m[shell exited: ${p.code}]\x1b[0m`);
     },
+    clear() { term.clear(); },
+    stop() {
+      Editor.Message.request(PKG, MSG.SIGNAL, sessionId, 'stop');
+      if (mode === 'line') {
+        setRunning(false);
+        term.writeln('\r\n\x1b[90m[stopped — shell restarted]\x1b[0m');
+        prompt();
+      }
+    },
+    getCwd() { return cwd; },
+    isRunning() { return running; },
+    setFont(cssFamily) { term.options.fontFamily = cssFamily; fit.fit(); },
+    setFontSize(px) { term.options.fontSize = px; fit.fit(); },
+    show() { view.classList.remove('hidden'); fit.fit(); term.focus(); },
+    hide() { view.classList.add('hidden'); },
     fit() { fit.fit(); },
+    focus() { term.focus(); },
     destroy() {
       store.save(editor.getHistory());
       Editor.Message.request(PKG, MSG.CLOSE_SESSION, sessionId);
       term.dispose();
+      view.remove();
     },
   };
 }
@@ -183,31 +196,125 @@ function createController(view: HTMLElement, toolbarRoot: HTMLElement, fontSetti
 export default Editor.Panel.define({
   template: `
     <div class="term-root">
+      <div class="term-tabs" id="tabs"></div>
       <div class="term-toolbar" id="toolbar"></div>
-      <div class="term-view" id="view"></div>
+      <div class="term-views" id="views"></div>
     </div>`,
   style: `${xtermCss}\n${ownCss}`,
-  $: { root: '.term-root', toolbar: '#toolbar', view: '#view' },
+  $: { root: '.term-root', tabs: '#tabs', toolbar: '#toolbar', views: '#views' },
 
   listeners: {
-    resize() { (this as any)._ctrl?.fit(); },
+    resize() { (this as any)._active()?.fit(); },
   },
 
   methods: {
-    onData(p: DataPayload) { (this as any)._ctrl?.onData(p); },
-    onIdle(p: IdlePayload) { (this as any)._ctrl?.onIdle(p); },
-    onExit(p: ExitPayload) { (this as any)._ctrl?.onExit(p); },
+    onData(p: DataPayload) { (this as any)._controllers?.get(p.sessionId)?.onData(p); },
+    onIdle(p: IdlePayload) { (this as any)._controllers?.get(p.sessionId)?.onIdle(p); },
+    onExit(p: ExitPayload) { (this as any)._controllers?.get(p.sessionId)?.onExit(p); },
+
+    _active(): Controller | null {
+      const self = this as any;
+      const id = self._model?.activeId();
+      return id ? (self._controllers.get(id) || null) : null;
+    },
+
+    _syncToolbar(ctrl: Controller) {
+      const self = this as any;
+      self._toolbar.setCwd(ctrl.getCwd());
+      self._toolbar.setRunning(ctrl.isRunning());
+    },
+
+    _newTab() {
+      const self = this as any;
+      const prev = self._active();
+      if (prev) prev.hide();
+
+      const id = newId();
+      self._counter += 1;
+      const title = `Terminal ${self._counter}`;
+      const view = self.$.views.ownerDocument.createElement('div');
+      view.className = 'term-view hidden';
+      self.$.views.appendChild(view);
+
+      const ctrl: Controller = createController(id, view, self._fontSettings, {
+        onCwd: (cwd: string) => { if (self._model.activeId() === id) self._toolbar.setCwd(cwd); },
+        onRunning: (r: boolean) => { if (self._model.activeId() === id) self._toolbar.setRunning(r); },
+      });
+      self._controllers.set(id, ctrl);
+      self._model.add(id, title);
+      self._bar.render();
+      ctrl.show();
+      self._syncToolbar(ctrl);
+    },
+
+    _switchTo(id: string) {
+      const self = this as any;
+      if (self._model.activeId() === id) return;
+      const prev = self._active();
+      if (prev) prev.hide();
+      self._model.select(id);
+      self._bar.render();
+      const ctrl: Controller | undefined = self._controllers.get(id);
+      if (ctrl) { ctrl.show(); self._syncToolbar(ctrl); }
+    },
+
+    _closeTab(id: string) {
+      const self = this as any;
+      const wasActive = self._model.activeId() === id;
+      const ctrl: Controller | undefined = self._controllers.get(id);
+      if (ctrl) { ctrl.destroy(); self._controllers.delete(id); }
+      const emptied = self._model.close(id);
+      if (emptied) { self._newTab(); return; }
+      self._bar.render();
+      if (wasActive) {
+        const next: Controller | undefined = self._controllers.get(self._model.activeId());
+        if (next) { next.show(); self._syncToolbar(next); }
+      }
+    },
   },
 
   async ready() {
     const self = this as any;
     const fontSettings = await loadFontSettings();
-    self._ctrl = createController(self.$.view, self.$.toolbar, fontSettings);
+    self._fontSettings = fontSettings;
+    self._controllers = new Map<string, Controller>();
+    self._model = new TabModel();
+    self._counter = 0;
+
+    self._toolbar = new Toolbar(self.$.toolbar, {
+      font: fontSettings.family,
+      fontSize: fontSettings.size,
+      onFont: (family: string) => {
+        fontSettings.family = family;
+        const css = toCssFamily(family);
+        for (const c of self._controllers.values() as Iterable<Controller>) c.setFont(css);
+        saveFontSettings(fontSettings);
+      },
+      onFontSize: (px: number) => {
+        fontSettings.size = px;
+        for (const c of self._controllers.values() as Iterable<Controller>) c.setFontSize(px);
+        saveFontSettings(fontSettings);
+      },
+      onClear: () => self._active()?.clear(),
+      onStop: () => self._active()?.stop(),
+    });
+
+    self._bar = new TabBar(self.$.tabs, self._model, {
+      onSelect: (id: string) => self._switchTo(id),
+      onClose: (id: string) => self._closeTab(id),
+      onNew: () => self._newTab(),
+      onRename: (id: string, title: string) => { self._model.rename(id, title); self._bar.render(); },
+      onColor: (id: string, color: string | null) => { self._model.setColor(id, color); self._bar.render(); },
+    });
+
+    self._newTab(); // first tab
   },
 
   close() {
     const self = this as any;
-    self._ctrl?.destroy();
-    self._ctrl = null;
+    if (self._controllers) {
+      for (const c of self._controllers.values() as Iterable<Controller>) c.destroy();
+      self._controllers.clear();
+    }
   },
 });
